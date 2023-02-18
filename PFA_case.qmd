@@ -1,0 +1,25 @@
+---
+title: "PFA_case"
+---
+
+
+```{python}
+import pandas as pd
+```
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+
+```{python}
+df_branche = pd.read_csv('data/arbejdsmarkedsanalyse_brancher.csv', sep=";", header = 0, decimal=',',encoding= 'unicode_escape')
+df_ka = pd.read_csv('data/arbejdsmarkedsanalyse_koen_alder.csv', sep=";", header = 0, decimal=',',encoding= 'unicode_escape')
+```
+
+
+
+```{python}
+print(1+1)
+```
+
