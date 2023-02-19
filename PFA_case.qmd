@@ -1,25 +1,199 @@
 ---
-title: "PFA_case"
+title: "PFA case - Anton Baht"
 ---
-
-
+## Initialize Packages
 ```{python}
+#| warning: false
+import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import cross_validate
+from xgboost import XGBRegressor
+from hyperopt import tpe, fmin, hp, STATUS_OK, Trials, space_eval
+from hyperopt.pyll import scope
+import shap
+from IPython.display import Markdown
+from tabulate import tabulate
 ```
 
-## Quarto
+## Get data
 
-Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+By inspecting the CSV, it is clear that first line is the header and each element is seperated with ";" and using "," for decimals.
+```{python}
+df_branche = pd.read_csv('data/arbejdsmarkedsanalyse_brancher.csv', sep=";", header = 0, decimal=',')
+df_ka = pd.read_csv('data/arbejdsmarkedsanalyse_koen_alder.csv', sep=";", header = 0, decimal=',')
+```
+
+Both dataframes has a row that is a sum of all others. These are then removed, as they dont contain info.
+
+```{python}
+#| column: page
+df_ka = df_ka[df_ka['Group'].map(len)>7] #Fjerner rækker med ingen alder specificeret.
+df_ka = df_ka[['Group','Score','Score (Indekseret score)','Question Label','Topic Label','Akse']]
+Markdown(tabulate(df_ka.sample(5,random_state=0), headers='keys',showindex=False))
+```
+
+```{python}
+#| column: page
+df_branche = df_branche[df_branche['Group']!="Total"] #Fjerner agg. række.
+df_branche = df_branche[['Group','Field Values','Field Values Index','Score','Score (Indekseret score)','Question Label','Topic Label','Hoej Score Godt','Akse']]
+Markdown(tabulate(df_branche.sample(5,random_state=1), headers='keys',showindex=False))
+
+```
+## Transforming the data
+
+By pivoting the data such that one row represents one group, one can start modelling the scores. For sake of brevity, the questions of a given topic has been mean aggregated. This reduces the dimension from 109 -> 37 
+
+```{python}
+#| column: page
+df_ka_wider = df_ka.pivot_table(index = 'Group', columns = 'Topic Label', values = 'Score (Indekseret score)')
+df_branche_wider = df_branche.pivot_table(index = 'Group', columns = 'Topic Label', values = 'Score (Indekseret score)')
+df_wide = pd.concat([df_branche_wider, df_ka_wider])
+
+Markdown(tabulate(df_wide.head(), headers='keys'))
+```
+
+
+## Correlations
+Let us look at the correlations between the answers of each topic.
 
 
 ```{python}
-df_branche = pd.read_csv('data/arbejdsmarkedsanalyse_brancher.csv', sep=";", header = 0, decimal=',',encoding= 'unicode_escape')
-df_ka = pd.read_csv('data/arbejdsmarkedsanalyse_koen_alder.csv', sep=";", header = 0, decimal=',',encoding= 'unicode_escape')
+sns.set(font_scale = 0.5)
+pl = plt.figure()
+pl.set_figwidth(8)
+correlations = df_wide.corr()
+sns.heatmap(round(correlations,2), cmap='RdBu', annot=False, vmin=-1, vmax=1)
+plt.show()
+```
+
+The topics can be clustered using hierarchical clustering with the correlation as distance metric and average linkage method.
+```{python}
+sns.clustermap(correlations, method="average", cmap='RdBu', annot=False, vmin=-1, vmax=1,dendrogram_ratio=0.1, figsize=(8,8),cbar_pos = (0.8, 0.05, .03, .15))
+plt.show()
 ```
 
 
+## Choosing a response variable
+From the above clustering of correlations the topic of "Fysisk hårdt arbejde" has been chosen as a response variable. The below plot looks at the distribution of scores in that topic across groups.
 
 ```{python}
-print(1+1)
+sns.displot(df_wide, x="Fysisk hårdt arbejde", kind="kde",aspect = 1.5)
+plt.xlim(0, 100)
+plt.show()
 ```
 
+
+## Training a model
+
+Let the training data be the industry dataset and the test data be the gender/age dataset. 
+
+```{python}
+y_train = df_branche_wider.loc[:,"Fysisk hårdt arbejde"]
+y_test = df_ka_wider.loc[:,"Fysisk hårdt arbejde"]
+X_train = df_branche_wider.drop("Fysisk hårdt arbejde", axis = 1)
+X_test = df_ka_wider.drop("Fysisk hårdt arbejde", axis = 1)
+```
+
+Let us define a function that evaluates a hyperparameter set. 5-fold cross validation is used and RMSE of the validation set is returned for the hyperparameter algorithm.
+
+```{python}
+def hyperparameter_tuning(space):
+    model=XGBRegressor().set_params(**space)   
+    
+    scores = cross_validate(model, X_train, y_train,scoring = "neg_root_mean_squared_error", cv=5)
+
+    score= scores['test_score'].mean()
+    return {'loss':-score, 'status': STATUS_OK, 'model': model}
+```
+
+The hyperparameter space is defined:
+
+```{python}
+space={'max_depth': scope.int(hp.quniform("max_depth", 1, 10, 1)),
+        'gamma': hp.uniform ('gamma', 0,0.05),
+        'reg_alpha' : hp.uniform('reg_alpha', 0,0.3),
+        'reg_lambda' : hp.uniform('reg_lambda', 0,1),
+        'colsample_bytree' : hp.uniform('colsample_bytree', 0.5,1),
+        'min_child_weight' : hp.uniform('min_child_weight', 0, 10),
+        'n_estimators': scope.int(hp.quniform('n_estimators', 10, 20, 1))
+    }
+
+```
+
+RMSE is minimized using bayesian optimization with the Tree Parzen Estimator. 
+
+```{python}
+#| cache: true
+trials = Trials()
+best = fmin(fn=hyperparameter_tuning,
+            space=space,
+            algo=tpe.suggest,
+            max_evals=100,
+            trials=trials,
+            verbose=False)
+space_tuned = space_eval(space,best)
+print (space_tuned)
+```
+
+Model is evaluated on the test set (gender/age dataset).
+
+```{python}
+#| output: false
+eval_set = [(X_train, y_train), (X_test, y_test)]
+model=XGBRegressor().set_params(**space_tuned)
+model.fit(X_train, y_train,eval_set=eval_set, eval_metric="rmse")
+results = model.evals_result()
+
+```
+
+```{python}
+
+x_axis = range(len(results['validation_0']['rmse']))
+fig, ax = plt.subplots()
+ax.plot(x_axis, results['validation_0']['rmse'], label='Train')
+ax.plot(x_axis, results['validation_1']['rmse'], label='Test')
+ax.legend()
+plt.ylabel('RMSE')
+plt.title('XGBoost RMSE')
+plt.show()
+
+```
+
+
+
+## Feature importance
+
+In order to understand the model, Shapley values is computed and in the following summary plot.
+
+```{python}
+#| warning: false
+#| column: page
+explainer = shap.TreeExplainer(model)
+shap_values = explainer(X_train)
+shap.summary_plot(shap_values, X_train, max_display=7)
+```
+
+Shapley values can also be used to explain individual predictions.
+
+```{python}
+#| column: page
+index=0
+shap_values = explainer(X_test)
+shap.plots.waterfall(shap_values[index],show=False)
+plt.title(f'The group [{X_test.index[0]}] had a score of: {y_test[index]:.3f}')
+plt.gcf().set_size_inches(6,5)
+plt.show()
+
+```
+
+
+
+
+
+## Referencer
+Susanne Rundé Jørgensen - TDC Finans \\
+Srjo@cbb.dk \\
++45 60507993 

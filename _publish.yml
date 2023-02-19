@@ -1,0 +1,4 @@
+- source: PFA_case.qmd
+  quarto-pub:
+    - id: 4fad378a-7a1d-4d3d-aa6f-f0482673c20c
+      url: 'https://quartopub.com/sites/abaht/pfa_case'
